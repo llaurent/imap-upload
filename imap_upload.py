@@ -1,3 +1,4 @@
+from twisted.mail import imap4;
 import codecs
 import email
 import email.header
@@ -168,15 +169,15 @@ class Progress():
         self.ok_count = 0
         self.count = 0
         self.format = "%" + str(len(str(total_count))) + "d/" + \
-                      str(total_count) + " %5.1f %-2s  %s  "
+                      str(total_count) + " %5.1f %-2s %s (%26s) "
 
-    def begin(self, msg):
+    def begin(self, msg, flags=[]):
         """Called when start proccessing of a new message."""
         self.time_began = time.time()
         size, prefix = si_prefix(float(len(msg.as_string())), threshold=0.8)
         sbj = self.decode_subject(msg["subject"] or "")
         print >>sys.stderr, self.format % \
-              (self.count + 1, size, prefix + "B", left_fit_width(sbj, 30)),
+              (self.count + 1, size, prefix + "B", left_fit_width(sbj, 30), "".join(flags).replace('\\',"")),
 
     def decode_subject(self, sbj):
         decoded = []
@@ -211,9 +212,20 @@ def upload(imap, src, err, time_fields):
     p = Progress(len(src))
     for i, msg in src.iteritems():
         try:
-            p.begin(msg)
+            flags = []
+            if "X-Mozilla-Status" in msg:
+                if int(msg["X-Mozilla-Status"],16) & 1 == 1:
+                    flags.append('\Seen')
+                if int(msg["X-Mozilla-Status"],16) & 2 == 2:
+                    flags.append('\Answered')
+                if int(msg["X-Mozilla-Status"],16) & 4 == 4:
+                    flags.append('\Flagged')
+                if int(msg["X-Mozilla-Status"],16) & 8 == 8:
+                    flags.append('\Deleted')
+            #print "FLAGS: %s" % " ".join(flags)
+            p.begin(msg, flags)
             r, r2 = imap.upload(msg.get_delivery_time(time_fields), 
-                                msg.as_string(), 3)
+                                msg.as_string(), 3, flags)
             if r != "OK":
                 raise Exception(r2[0]) # FIXME: Should use custom class
             p.endOk()
@@ -287,17 +299,19 @@ class IMAPUploader:
         self.host = host
         self.port = port
         self.ssl = ssl
-        self.box = box
+        self.box = box.decode('utf-8').encode('imap4-utf-7')
         self.user = user
         self.password = password
         self.retry = retry
 
-    def upload(self, delivery_time, message, retry = None):
+    def upload(self, delivery_time, message, retry = None, flags = []):
         if retry is None:
             retry = self.retry
+        if flags != []:
+            flags = " ".join(flags)
         try:
             self.open()
-            return self.imap.append(self.box, [], delivery_time, message)
+            return self.imap.append(self.box, flags, delivery_time, message)
         except (imaplib.IMAP4.abort, socket.error):
             self.close()
             if retry == 0:
@@ -313,6 +327,10 @@ class IMAPUploader:
         self.imap = imap_class(self.host, self.port)
         self.imap.socket().settimeout(60)
         self.imap.login(self.user, self.password)
+        print self.imap.list(self.box)
+        if self.imap.list(self.box)[1] == [None]:
+            self.imap.create(self.box)
+            print "created folder %s (imap4-utf-7 encoded)" % ( self.box )
 
     def close(self):
         if not self.imap:
